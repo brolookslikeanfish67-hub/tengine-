@@ -1,13 +1,5 @@
 # Contributor: Tengine Team <tengine@taobao.net>
 # Maintainer: Tengine Team <tengine@taobao.net>
-#
-# Alpine (musl) package for Tengine.  Built by packages/build/build.sh, which
-# drops the source tarball next to this file and runs `abuild checksum && abuild -r`.
-#
-# _upstream_ver is the plain upstream version and must match the top level
-# directory inside the tarball; pkgver may additionally carry a _p<timestamp>
-# suffix injected by build.sh so every build is uniquely versioned.
-#
 pkgname=tengine
 _upstream_ver=3.2.0
 pkgver=3.2.0
@@ -15,23 +7,21 @@ pkgrel=0
 pkgdesc="Tengine HTTP and reverse proxy server with Tongsuo, xquic and Lua"
 url="https://tengine.taobao.org/"
 arch="all"
-# Tengine and the resty Lua libraries are BSD-2-Clause, Tongsuo and xquic are
-# Apache-2.0, LuaJIT is MIT.
 license="BSD-2-Clause AND Apache-2.0 AND MIT"
+depends="logrotate"
 makedepends="
+	cmake
+	g++
 	linux-headers
 	openssl-dev
 	pcre2-dev
-	zlib-dev
-	cmake
-	g++
 	perl
+	zlib-dev
 	"
 install="$pkgname.pre-install"
 subpackages="$pkgname-doc $pkgname-openrc"
-# tengine-deps.tar.gz holds the pinned Tongsuo / xquic / LuaJIT / resty
-# tarballs; abuild unpacks it to $srcdir/deps.
-source="$pkgname-$_upstream_ver.tar.gz
+source="
+	$pkgname-$_upstream_ver.tar.gz
 	$pkgname-deps.tar.gz
 	tengine.openrc
 	tengine.logrotate
@@ -39,21 +29,13 @@ source="$pkgname-$_upstream_ver.tar.gz
 	default.conf
 	"
 builddir="$srcdir/$pkgname-$_upstream_ver"
-options="!check"	# no upstream test suite wired into the build
+options="!check" # No upstream test suite wired into the build
 
 build() {
-	# ngx_backtrace_module needs backtrace() from execinfo.h, which musl
-	# does not provide -- its config aborts configure outright, so keep it
-	# out of the Alpine feature set.
-	#
-	# The tree defaults to -Werror (auto/cc/gcc); relax it so an arbitrary
-	# gcc version cannot break packaging.
 	export TENGINE_LIBDIR=/usr/lib
 	export TENGINE_WITH_BACKTRACE=no
 
-	# Tongsuo, xquic and LuaJIT come from the pinned sources in $srcdir/deps.
-	# --libdir is the installed path because ngx_http_xquic_module records it
-	# as libxquic.so's runtime path.
+	# Build pinned dependencies
 	sh packages/build/build-deps.sh \
 		--srcdir "$srcdir/deps" \
 		--workdir "$srcdir/deps-build" \
@@ -63,8 +45,12 @@ build() {
 
 	. "$srcdir"/deps-build/deps-env.sh
 
+	# Extract repeating configuration evaluation arguments
+	local cfg_args
+	cfg_args=$(sh packages/build/configure-args.sh)
+
 	./configure \
-		$(sh packages/build/configure-args.sh) \
+		$cfg_args \
 		--with-cc-opt="$CFLAGS -Wno-error" \
 		--with-ld-opt="$LDFLAGS $(sh packages/build/configure-args.sh --print-ld-opt)" \
 		--with-openssl-opt="$(sh packages/build/configure-args.sh --print-openssl-opt)"
@@ -75,43 +61,39 @@ build() {
 package() {
 	make DESTDIR="$pkgdir" install
 
-	# The bundled libxquic.so / libluajit and the Lua modules are staged with
-	# their final absolute paths already in place.
+	# Merge pre-staged dependencies
 	cp -a "$srcdir"/deps-staging/. "$pkgdir"/
 
-	# make install drops the stock nginx.conf plus *.default copies; replace
-	# them with the packaged tengine.conf so the shipped names stay consistent.
+	# Remove stock templates and install customized production configs
 	rm -f "$pkgdir"/etc/tengine/*.default
-	install -D -m 0644 "$srcdir"/tengine.conf \
-		"$pkgdir"/etc/tengine/tengine.conf
-	# lua_package_cpath carries a libdir placeholder; apk always uses /usr/lib.
-	sed -i -e 's|@TENGINE_LIBDIR@|/usr/lib|g' \
-		"$pkgdir"/etc/tengine/tengine.conf
-	install -D -m 0644 "$srcdir"/default.conf \
-		"$pkgdir"/etc/tengine/conf.d/default.conf
-	install -D -m 0644 "$srcdir"/tengine.logrotate \
-		"$pkgdir"/etc/logrotate.d/tengine
+	
+	install -D -m 0644 "$srcdir"/tengine.conf "$pkgdir"/etc/tengine/tengine.conf
+	install -D -m 0644 "$srcdir"/default.conf "$pkgdir"/etc/tengine/conf.d/default.conf
+	install -D -m 0644 "$srcdir"/tengine.logrotate "$pkgdir"/etc/logrotate.d/tengine
+	install -D -m 0755 "$srcdir"/tengine.openrc "$pkgdir"/etc/init.d/tengine
 
-	sed -e 's|%%PREFIX%%|/usr/share/tengine|' \
-	    -e 's|%%PID_PATH%%|/run/tengine.pid|' \
-	    -e 's|%%CONF_PATH%%|/etc/tengine/tengine.conf|' \
-	    -e 's|%%ERROR_LOG_PATH%%|/var/log/tengine/error.log|' \
-	    man/nginx.8 > tengine.8
-	install -D -m 0644 tengine.8 \
-		"$pkgdir"/usr/share/man/man8/tengine.8
+	# Replace libdir placeholder in config
+	sed -i 's|@TENGINE_LIBDIR@|/usr/lib|g' "$pkgdir"/etc/tengine/tengine.conf
 
-	install -D -m 0755 "$srcdir"/tengine.openrc \
-		"$pkgdir"/etc/init.d/tengine
+	# Generate and place the man page
+	sed \
+		-e 's|%%PREFIX%%|/usr/share/tengine|' \
+		-e 's|%%PID_PATH%%|/run/tengine.pid|' \
+		-e 's|%%CONF_PATH%%|/etc/tengine/tengine.conf|' \
+		-e 's|%%ERROR_LOG_PATH%%|/var/log/tengine/error.log|' \
+		man/nginx.8 > tengine.8
+	install -D -m 0644 tengine.8 "$pkgdir"/usr/share/man/man8/tengine.8
 
+	# Establish required operational directory structures
 	install -d -m 0700 -o tengine -g tengine "$pkgdir"/var/cache/tengine
 	install -d -m 0755 -o tengine -g tengine "$pkgdir"/var/log/tengine
 	install -d -m 0755 "$pkgdir"/usr/lib/tengine/modules
 
-	# /run is a tmpfs; make install creates it because of --pid-path
+	# Cleanup transient runtime paths generated by 'make install'
 	rm -rf "$pkgdir"/run "$pkgdir"/var/run
 
-	install -D -m 0644 LICENSE \
-		"$pkgdir"/usr/share/licenses/$pkgname/LICENSE
+	# Licensing compliance
+	install -D -m 0644 LICENSE "$pkgdir"/usr/share/licenses/$pkgname/LICENSE
 }
 
 sha512sums="SKIP"
